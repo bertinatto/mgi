@@ -62,8 +62,19 @@ func (i *IndexService) Add(path string, sum1 [20]byte) error {
 		Path:          path,
 	}
 
-	i.index.Entries = append(i.index.Entries, entry)
-	i.index.EntryCount = len(i.index.Entries)
+	var replaced bool
+	for ei, v := range i.index.Entries {
+		if v.Path == entry.Path {
+			i.index.Entries[ei] = entry
+			replaced = true
+		}
+	}
+
+	if !replaced {
+		i.index.Entries = append(i.index.Entries, entry)
+		i.index.EntryCount = len(i.index.Entries)
+	}
+
 	return nil
 }
 
