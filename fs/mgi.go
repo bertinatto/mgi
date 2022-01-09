@@ -35,6 +35,7 @@ func (m *MGIService) Add(files []string) error {
 	}
 
 	for _, f := range files {
+		f := strings.Trim(f, "./")
 		fileData, err := ioutil.ReadFile(f)
 		if err != nil {
 			// TODO: make this atomic instead
@@ -162,6 +163,7 @@ func (m *MGIService) writeTree() (string, error) {
 	return sum, err
 }
 
+// TODO: move this to object.go
 type TreeEntry struct {
 	Mode uint32
 	Path string
@@ -173,50 +175,53 @@ func (m *MGIService) writeSubTree(subTree string, entries []*mgi.IndexEntry) (st
 		subTree = ""
 	}
 
-	// b := new(bytes.Buffer)
-	// var lines []*TreeEntry
-	kv := make(map[string]*TreeEntry)
-	for _, entry := range entries {
-		dir, _ := filepath.Split(entry.Path)
-		if dir == subTree {
+	children := make(map[string]*TreeEntry)
+	for _, indexEntry := range entries {
+		// TODO: replace Split with Dir, so that the trailing / is gone
+		entryDir, _ := filepath.Split(indexEntry.Path)
+		if entryDir == subTree {
 			// The entry is a direct child of the subTree, so add it to our object
-			// line := fmt.Sprintf("%o %s\x00%s", entry.Mode, filepath.Base(entry.Path), string(entry.Sha1[:]))
-			// b.WriteString(line)
 			e := &TreeEntry{
-				Mode: entry.Mode,
-				Path: filepath.Base(entry.Path),
-				Sha1: entry.Sha1,
+				Mode: indexEntry.Mode,
+				Path: filepath.Base(indexEntry.Path),
+				Sha1: indexEntry.Sha1,
 			}
-			// lines = append(lines, e)
-			kv[e.Path] = e
+			children[e.Path] = e
+
 		} else {
-			parentDir := filepath.Dir(strings.TrimSuffix(dir, "/"))
-			if parentDir == "." {
-				parentDir = ""
-			}
-			if subTree == parentDir {
-				// This entry is located at: subTree/X/entry. We need to find out
-				// the sum of X before we can write the tree object for subTree
-				_, sumBytes, err := m.writeSubTree(dir, entries)
+			// We are only interested in direct childs
+			if strings.HasPrefix(entryDir, subTree) {
+				// Hey, dir is a child of subTree, but is it a direct child?
+				directChild := strings.TrimPrefix(entryDir, subTree) // a/b/c, a/ -> b/c
+				dirs := strings.Split(directChild, "/")
+
+				directChild = dirs[0]
+				if directChild == "" {
+					continue
+				}
+				if _, ok := children[directChild]; ok {
+					continue
+				}
+
+				nextDirPath := filepath.Join(subTree, directChild) + "/"
+				_, sumBytes, err := m.writeSubTree(nextDirPath, entries)
 				if err != nil {
 					return "", nil, err
 				}
-				// b.WriteString(fmt.Sprintf("%o %s\x00%s", 040000, filepath.Base(dir), sumBytes))
+
 				e := &TreeEntry{
 					Mode: 040000,
-					Path: filepath.Base(dir),
+					Path: directChild,
 				}
 				copy(e.Sha1[:], sumBytes)
-				// lines = append(lines, e)
-				kv[e.Path] = e
+				children[e.Path] = e
 			}
 		}
 	}
 
-	// if len(lines) > 0 {
-	if len(kv) > 0 {
-		lines := make([]*TreeEntry, 0, len(kv))
-		for _, v := range kv {
+	if len(children) > 0 {
+		lines := make([]*TreeEntry, 0, len(children))
+		for _, v := range children {
 			lines = append(lines, v)
 		}
 
