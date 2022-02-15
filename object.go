@@ -198,7 +198,13 @@ func (o *ObjectService) ReadObject(hash string) ([]byte, error) {
 		return nil, err
 	}
 
-	return ioutil.ReadAll(r)
+	contents, err := ioutil.ReadAll(r)
+	if err != nil {
+		return nil, err
+	}
+
+	i := bytes.IndexByte(contents, byte('\x00'))
+	return contents[i+1:], nil
 }
 
 func join(header []byte, data []byte) ([]byte, error) {
