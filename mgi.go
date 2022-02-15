@@ -32,7 +32,7 @@ func (m *MGIService) Add(files []string) error {
 	}
 
 	for _, f := range files {
-		f := strings.Trim(f, "./")
+		f := strings.TrimPrefix(f, "./")
 		fileData, err := ioutil.ReadFile(f)
 		if err != nil {
 			// TODO: make this atomic instead
