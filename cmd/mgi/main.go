@@ -20,9 +20,10 @@ func main() {
 	addCmd := flag.NewFlagSet("add", flag.ExitOnError)
 	commitCmd := flag.NewFlagSet("commit", flag.ExitOnError)
 	statusCmd := flag.NewFlagSet("status", flag.ExitOnError)
+	diffCmd := flag.NewFlagSet("diff", flag.ExitOnError)
 
 	if len(os.Args) < 2 {
-		fmt.Fprintf(os.Stderr, "Available subcommands: init, add, commit, status")
+		fmt.Fprintf(os.Stderr, "Available subcommands: init, add, commit, status, diff")
 		os.Exit(1)
 	}
 
@@ -88,6 +89,27 @@ func main() {
 			for i := range modified {
 				fmt.Printf("\t%s\n", modified[i])
 			}
+		}
+	case "diff":
+		diffCmd.Parse(os.Args[2:])
+		opts := diffCmd.Args()
+		if len(opts) > 0 {
+			fmt.Fprintf(os.Stderr, "diff command does not have arguments")
+			os.Exit(1)
+		}
+
+		indexService := mgi.NewIndexService(rootLocation)
+		obj := mgi.NewObjectService(rootLocation)
+		mgi := mgi.NewMGIService(rootLocation, obj, indexService)
+
+		diffs, err := mgi.Diff()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error checking diff: %v", err)
+			os.Exit(1)
+		}
+
+		for i := range diffs {
+			fmt.Printf("%s\n", diffs[i])
 		}
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown command")

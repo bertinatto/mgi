@@ -17,6 +17,12 @@ type Hash struct {
 	sha1 [20]byte
 }
 
+// From returns a new *Hash from an existing SHA-1.
+func (h *Hash) FromSHA1(sha1 [20]byte) *Hash {
+	h.sha1 = sha1
+	return h
+}
+
 // From returns a new *Hash from a given file.
 func (h *Hash) From(data []byte) *Hash {
 	h.sha1 = sha1.Sum(data)

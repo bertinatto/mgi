@@ -2,10 +2,12 @@ package mgi
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io/fs"
 	"io/ioutil"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -276,8 +278,54 @@ func (m *MGIService) Show() (string, error) {
 	panic("Implement me")
 }
 
-func (m *MGIService) Diff() (string, error) {
-	panic("Implement me")
+func (m *MGIService) Diff() ([]string, error) {
+	repoRoot, err := findRoot(m.root)
+	if err != nil {
+		return nil, err
+	}
+
+	index, err := m.index.Read()
+	if err != nil {
+		return nil, fmt.Errorf("error reading index file: %v", err)
+	}
+
+	var diffs []string
+	for _, ie := range index.Entries {
+		file := filepath.Join(repoRoot, ie.Path)
+		fileData, err := ioutil.ReadFile(file)
+		if err != nil {
+			return nil, err
+		}
+
+		hash, err := m.obj.HashObject(&Blob{fileData})
+		if err != nil {
+			return nil, err
+		}
+
+		if !bytes.Equal(hash.Bytes(), ie.Sha1[:]) {
+			indexedHash := new(Hash).FromSHA1(ie.Sha1)
+
+			indexedData, err := m.obj.ReadObject(indexedHash.String())
+			if err != nil {
+				return nil, err
+			}
+
+			c := exec.Command("diff", "-u", file, "/dev/stdin")
+			buffer := bytes.Buffer{}
+			buffer.Write(indexedData)
+			c.Stdin = &buffer
+
+			var cerr *exec.ExitError
+			out, err := c.CombinedOutput()
+			if !errors.As(err, &cerr) {
+				fmt.Fprintf(os.Stderr, "Failed to run diff: %v", err)
+				os.Exit(1)
+			}
+			diffs = append(diffs, string(out))
+		}
+	}
+
+	return diffs, nil
 }
 
 func (m *MGIService) Pull(remote string) error {
