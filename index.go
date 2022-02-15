@@ -54,7 +54,7 @@ func NewIndexService(root string) *IndexService {
 }
 
 // todo: before calling this, the user needs to o.Store(BlobType, bytes)
-func (i *IndexService) Add(path string, sum1 [20]byte) error {
+func (i *IndexService) Add(path string, hash *Hash) error {
 	fi, err := os.Stat(path)
 	if err != nil {
 		return err
@@ -79,7 +79,7 @@ func (i *IndexService) Add(path string, sum1 [20]byte) error {
 		Uid:           stat.Uid,
 		Gid:           stat.Gid,
 		FileSize:      uint32(stat.Size),
-		Sha1:          sum1,
+		Sha1:          hash.Sha1(),
 		Flags:         uint16(len(path)),
 		Path:          path,
 	}

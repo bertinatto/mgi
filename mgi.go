@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"fmt"
 	"io/ioutil"
-	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -40,12 +39,13 @@ func (m *MGIService) Add(files []string) error {
 			return err
 		}
 
-		_, sha1Bytes, err := m.obj.Store(BlobType, fileData)
+		blob := &Blob{Data: fileData}
+		hash, err := m.obj.StoreObject(blob)
 		if err != nil {
 			return err
 		}
 
-		err = m.index.Add(f, sha1Bytes)
+		err = m.index.Add(f, hash)
 		if err != nil {
 			return err
 		}
@@ -60,50 +60,36 @@ func (m *MGIService) Commit(msg string) error {
 		return err
 	}
 
-	now := time.Now()
-	_, offset := now.Zone()
-
-	// Find out the author time
-	var aTime strings.Builder
-	var sign string
-	if offset > 0 {
-		sign = "+"
-	} else {
-		sign = "-"
-	}
-	fo := int64(math.Abs(float64(offset)))
-	timestamp := int64(math.Abs(float64(now.Unix())))
-	aTime.WriteString(fmt.Sprintf("%d %s%02d%02d", timestamp, sign, fo/3600, (fo/60)%60))
-	authorTime := aTime.String()
-
-	// TODO: this is leaking details about the object. Move this to object.go.
-	b := new(bytes.Buffer)
-	b.WriteString("tree " + tree)
-	b.WriteString("\n")
-
 	parent, err := m.currentHead()
 	if err != nil {
 		return err
 	}
 
-	if parent != "" {
-		b.WriteString("parent " + parent)
-		b.WriteString("\n")
+	author := os.Getenv("GIT_AUTHOR")
+	if author == "" {
+		author = os.Getenv("USER")
 	}
 
-	b.WriteString(fmt.Sprintf("author %s %s", "Fabio <fabio@fabio>", authorTime))
-	b.WriteString("\n")
-	b.WriteString(fmt.Sprintf("committer %s %s", "Fabio <fabio@fabio>", authorTime))
-	b.WriteString("\n")
-	b.WriteString("\n")
-	b.WriteString(msg)
-	b.WriteString("\n")
+	authorEmail := os.Getenv("GIT_EMAIL")
+	if authorEmail == "" {
+		authorEmail = os.Getenv("USER") + "@" + os.Getenv("HOSTNAME")
+	}
 
-	sha1, _, err := m.obj.Store(CommitType, b.Bytes())
+	c := &Commit{
+		Parent:      parent,
+		Tree:        tree,
+		Author:      author,
+		AuthorEmail: authorEmail,
+		AuthorTime:  time.Now(),
+		Message:     msg,
+	}
+
+	hash, err := m.obj.StoreObject(c)
 	if err != nil {
 		return err
 	}
 
+	// Update the tip
 	pathMaster := filepath.Join(m.root, "refs", "heads", "master")
 	fd, err := os.OpenFile(pathMaster, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
 	if err != nil {
@@ -111,29 +97,9 @@ func (m *MGIService) Commit(msg string) error {
 	}
 	defer fd.Close()
 
-	fd.WriteString(sha1)
+	fd.WriteString(hash.String())
 	fd.WriteString("\n")
 
-	return nil
-}
-
-func (m *MGIService) Diff() (string, error) {
-	return "", nil
-}
-
-func (m *MGIService) Show() (string, error) {
-	return "", nil
-}
-
-func (m *MGIService) Status() (string, error) {
-	return "", nil
-}
-
-func (m *MGIService) Pull(remote string) error {
-	return nil
-}
-
-func (m *MGIService) Push(remote string) error {
 	return nil
 }
 
@@ -143,13 +109,10 @@ func (m *MGIService) currentHead() (string, error) {
 	if os.IsNotExist(err) {
 		return "", nil
 	}
-
 	if err != nil {
 		return "", err
 	}
-
-	sha1 := bytes.TrimSpace(contents)
-	return string(sha1), nil
+	return string(bytes.TrimSpace(contents)), nil
 }
 
 func (m *MGIService) writeTree() (string, error) {
@@ -157,21 +120,16 @@ func (m *MGIService) writeTree() (string, error) {
 	if err != nil {
 		return "", err
 	}
-
-	sum, _, err := m.writeSubTree(".", index.Entries)
-	return sum, err
-}
-
-// TODO: move this to object.go
-type treeEntry struct {
-	mode uint32
-	path string
-	sha1 [20]byte
+	hash, err := m.writeSubTree(".", index.Entries)
+	if err != nil {
+		return "", err
+	}
+	return hash.String(), nil
 }
 
 // writeSubTree writes a tree object for the given path. It may be called recursively.
 // The subTree parameter must end with a slash ("/") or it can be an emtpy string (to represent the current directory
-func (m *MGIService) writeSubTree(subTree string, entries []*IndexEntry) (string, []byte, error) {
+func (m *MGIService) writeSubTree(subTree string, entries []*IndexEntry) (*Hash, error) {
 	if subTree == "." {
 		subTree = ""
 	}
@@ -180,12 +138,12 @@ func (m *MGIService) writeSubTree(subTree string, entries []*IndexEntry) (string
 	}
 
 	// First of all, we are going to figure out the entries for our tree object
-	children := make(map[string]*treeEntry)
+	children := make(map[string]*TreeEntry)
 	for _, indexEntry := range entries {
 		entryDir, entryFile := filepath.Split(indexEntry.Path)
 		if entryDir == subTree {
 			// The entry is both a file and a direct child of the subTree, so add it to our tree object listing
-			e := &treeEntry{
+			e := &TreeEntry{
 				mode: indexEntry.Mode,
 				// path: filepath.Base(indexEntry.Path),
 				path: entryFile,
@@ -204,23 +162,23 @@ func (m *MGIService) writeSubTree(subTree string, entries []*IndexEntry) (string
 
 			// Before we can create the tree object for subTree, we need to create an object for this sub-directory
 			nextDirPath := filepath.Join(subTree, directChild) + string(os.PathSeparator)
-			_, sumBytes, err := m.writeSubTree(nextDirPath, entries)
+			hash, err := m.writeSubTree(nextDirPath, entries)
 			if err != nil {
-				return "", nil, err
+				return nil, err
 			}
 
-			e := &treeEntry{
+			e := &TreeEntry{
 				mode: 040000,
 				path: directChild,
 			}
-			copy(e.sha1[:], sumBytes)
+			copy(e.sha1[:], hash.Bytes())
 			children[e.path] = e
 		}
 	}
 
 	// Now the we know the entries, write the tree object
 	if len(children) > 0 {
-		lines := make([]*treeEntry, 0, len(children))
+		lines := make([]*TreeEntry, 0, len(children))
 		for _, v := range children {
 			lines = append(lines, v)
 		}
@@ -230,17 +188,33 @@ func (m *MGIService) writeSubTree(subTree string, entries []*IndexEntry) (string
 			return lines[i].path < lines[j].path
 		})
 
-		b := new(bytes.Buffer)
-		for _, e := range lines {
-			b.WriteString(fmt.Sprintf("%o %s\x00%s", e.mode, e.path, e.sha1))
-		}
-
-		sum, sumBytes, err := m.obj.Store(TreeType, b.Bytes())
+		t := &Tree{Entries: lines}
+		hash, err := m.obj.StoreObject(t)
 		if err != nil {
-			return "", nil, err
+			return nil, err
 		}
-		return sum, sumBytes[:], nil
+		return hash, nil
 	}
 
-	return "", nil, fmt.Errorf("failed to write a tree")
+	return nil, fmt.Errorf("failed to write a tree")
+}
+
+func (m *MGIService) Diff() (string, error) {
+	panic("Implement me")
+}
+
+func (m *MGIService) Show() (string, error) {
+	panic("Implement me")
+}
+
+func (m *MGIService) Status() (string, error) {
+	panic("Implement me")
+}
+
+func (m *MGIService) Pull(remote string) error {
+	panic("Implement me")
+}
+
+func (m *MGIService) Push(remote string) error {
+	panic("Implement me")
 }
