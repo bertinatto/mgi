@@ -138,6 +138,14 @@ func NewObjectService(root string) *ObjectService {
 	}
 }
 
+func (o *ObjectService) HashObject(m Marshaller) (*Hash, error) {
+	data, err := m.Marshal()
+	if err != nil {
+		return nil, err
+	}
+	return new(Hash).From(data), nil
+}
+
 // StoreObject compresses and stores the object to the disk.
 func (o *ObjectService) StoreObject(m Marshaller) (*Hash, error) {
 	data, err := m.Marshal()

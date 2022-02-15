@@ -3,6 +3,7 @@ package mgi
 import (
 	"bytes"
 	"fmt"
+	"io/fs"
 	"io/ioutil"
 	"os"
 	"path/filepath"
@@ -199,15 +200,83 @@ func (m *MGIService) writeSubTree(subTree string, entries []*IndexEntry) (*Hash,
 	return nil, fmt.Errorf("failed to write a tree")
 }
 
-func (m *MGIService) Diff() (string, error) {
-	panic("Implement me")
+func (m *MGIService) findIndexEntry(path string) (*IndexEntry, error) {
+	index, err := m.index.Read()
+	if err != nil {
+		return nil, fmt.Errorf("error reading index file: %v", err)
+	}
+
+	for _, entry := range index.Entries {
+		if entry.Path == path {
+			return entry, nil
+		}
+	}
+
+	return nil, os.ErrNotExist
+}
+
+func (m *MGIService) Status() ([]string, []string, error) {
+	repoRoot, err := findRoot(m.root)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	var untracked []string
+	var modified []string
+	err = filepath.WalkDir(repoRoot, func(path string, d fs.DirEntry, walkErr error) error {
+		if d.IsDir() {
+			return nil
+		}
+
+		if strings.Contains(path, ".git/") {
+			return nil
+		}
+
+		// TODO: parse .gitignore
+
+		fileData, err := ioutil.ReadFile(path)
+		if err != nil {
+			return err
+		}
+
+		hash, err := m.obj.HashObject(&Blob{fileData})
+		if err != nil {
+			return err
+		}
+
+		relPath, err := filepath.Rel(repoRoot, path)
+		if err != nil {
+			return err
+		}
+
+		indexEntry, err := m.findIndexEntry(relPath)
+		if os.IsNotExist(err) {
+			untracked = append(untracked, relPath)
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+
+		if !bytes.Equal(hash.Bytes(), indexEntry.Sha1[:]) {
+			modified = append(modified, relPath)
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return untracked, modified, nil
 }
 
 func (m *MGIService) Show() (string, error) {
 	panic("Implement me")
 }
 
-func (m *MGIService) Status() (string, error) {
+func (m *MGIService) Diff() (string, error) {
 	panic("Implement me")
 }
 
@@ -217,4 +286,22 @@ func (m *MGIService) Pull(remote string) error {
 
 func (m *MGIService) Push(remote string) error {
 	panic("Implement me")
+}
+
+func findRoot(gitRoot string) (string, error) {
+	currentDir, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+
+	for currentDir != "/" {
+		absGitRoot := filepath.Join(currentDir, gitRoot)
+		fi, err := os.Stat(absGitRoot)
+		if fi != nil && !os.IsNotExist(err) {
+			return currentDir, nil
+		} else {
+			currentDir = filepath.Dir(currentDir)
+		}
+	}
+	return "", fmt.Errorf("not in a git repository")
 }
