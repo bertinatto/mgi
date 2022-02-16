@@ -150,7 +150,7 @@ func (m *MGIService) writeSubTree(subTree string, entries []*IndexEntry) (*Hash,
 				mode: indexEntry.Mode,
 				// path: filepath.Base(indexEntry.Path),
 				path: entryFile,
-				sha1: indexEntry.Sha1,
+				hash: indexEntry.Hash,
 			}
 			children[e.path] = e
 
@@ -174,7 +174,7 @@ func (m *MGIService) writeSubTree(subTree string, entries []*IndexEntry) (*Hash,
 				mode: 040000,
 				path: directChild,
 			}
-			copy(e.sha1[:], hash.Bytes())
+			e.hash = hash
 			children[e.path] = e
 		}
 	}
@@ -260,7 +260,7 @@ func (m *MGIService) Status() ([]string, []string, error) {
 			return err
 		}
 
-		if !bytes.Equal(hash.Bytes(), indexEntry.Sha1[:]) {
+		if hash.String() != indexEntry.Hash.String() {
 			modified = append(modified, relPath)
 		}
 
@@ -302,10 +302,8 @@ func (m *MGIService) Diff() ([]string, error) {
 			return nil, err
 		}
 
-		if !bytes.Equal(hash.Bytes(), ie.Sha1[:]) {
-			indexedHash := new(Hash).FromSHA1(ie.Sha1)
-
-			indexedData, err := m.obj.ReadObject(indexedHash.String())
+		if hash.String() != ie.Hash.String() {
+			indexedData, err := m.obj.ReadObject(ie.Hash)
 			if err != nil {
 				return nil, err
 			}

@@ -1,6 +1,7 @@
 package mgi
 
 import (
+	"bufio"
 	"bytes"
 	"crypto/sha1"
 	"encoding/binary"
@@ -14,14 +15,16 @@ import (
 	"syscall"
 )
 
+// Index represents a git index file, typically ".git/index".
 type Index struct {
 	Signature  string
 	Version    string
 	EntryCount int
 	Entries    []*IndexEntry
-	Hash       string
+	Hash       *Hash
 }
 
+// IndexEntry stores
 type IndexEntry struct {
 	CTimeSecs     uint32
 	CTimeNanoSecs uint32
@@ -33,7 +36,7 @@ type IndexEntry struct {
 	Uid           uint32
 	Gid           uint32
 	FileSize      uint32
-	Sha1          [20]byte
+	Hash          *Hash
 	Flags         uint16
 	Path          string
 }
@@ -53,7 +56,6 @@ func NewIndexService(root string) *IndexService {
 	}
 }
 
-// todo: before calling this, the user needs to o.Store(BlobType, bytes)
 func (i *IndexService) Add(path string, hash *Hash) error {
 	fi, err := os.Stat(path)
 	if err != nil {
@@ -79,7 +81,7 @@ func (i *IndexService) Add(path string, hash *Hash) error {
 		Uid:           stat.Uid,
 		Gid:           stat.Gid,
 		FileSize:      uint32(stat.Size),
-		Sha1:          hash.Sha1(),
+		Hash:          hash,
 		Flags:         uint16(len(path)),
 		Path:          path,
 	}
@@ -100,19 +102,20 @@ func (i *IndexService) Add(path string, hash *Hash) error {
 	return nil
 }
 
-func (i *IndexService) Store() error {
-	mb := new(bytes.Buffer)
-
+func (i *IndexService) Marshal() ([]byte, error) {
+	// Build the index signature.
 	var signature [4]byte
 	if len(i.index.Signature) != 4 {
-		return fmt.Errorf("signature must be 4 bytes long")
+		return nil, fmt.Errorf("signature must be 4 bytes long")
 	}
 	copy(signature[:], []byte(i.index.Signature))
+	mb := new(bytes.Buffer)
 	binary.Write(mb, binary.BigEndian, signature)
 
+	// Build version and entry count.
 	version, err := strconv.Atoi(i.index.Version)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	binary.Write(mb, binary.BigEndian, uint32(version))
 	binary.Write(mb, binary.BigEndian, uint32(i.index.EntryCount))
@@ -122,6 +125,7 @@ func (i *IndexService) Store() error {
 		return i.index.Entries[x].Path < i.index.Entries[y].Path
 	})
 
+	// Serialize each index entry to a format that can be stored on disk.
 	for _, v := range i.index.Entries {
 		b := new(bytes.Buffer)
 		binary.Write(b, binary.BigEndian, v.CTimeSecs)
@@ -134,11 +138,12 @@ func (i *IndexService) Store() error {
 		binary.Write(b, binary.BigEndian, v.Uid)
 		binary.Write(b, binary.BigEndian, v.Gid)
 		binary.Write(b, binary.BigEndian, v.FileSize)
-		binary.Write(b, binary.BigEndian, v.Sha1)
+		binary.Write(b, binary.BigEndian, v.Hash)
 		binary.Write(b, binary.BigEndian, v.Flags)
 		b.WriteString(v.Path)
 		b.WriteString("\x00")
 
+		// Some entries require some padding.
 		length := ((62 + len(v.Path) + 8) / 8) * 8
 		for b.Len() < length {
 			b.WriteString("\x00")
@@ -146,20 +151,26 @@ func (i *IndexService) Store() error {
 		mb.Write(b.Bytes())
 	}
 
-	sum := sha1.Sum(mb.Bytes())
-	binary.Write(mb, binary.BigEndian, sum)
+	binary.Write(mb, binary.BigEndian, sha1.Sum(mb.Bytes()))
+	return mb.Bytes(), nil
+}
 
+func (i *IndexService) Store() error {
+	data, err := i.Marshal()
+	if err != nil {
+		return err
+	}
 	fd, err := os.OpenFile(i.path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|os.O_APPEND, 0600)
 	if err != nil {
 		return err
 	}
 	defer fd.Close()
-
-	_, err = fd.Write(mb.Bytes())
+	_, err = fd.Write(data)
 	return err
 }
 
 func (i *IndexService) Read() (*Index, error) {
+	// Read the file stored on disk and create an in-memory representation of it.
 	data, err := ioutil.ReadFile(i.path)
 	if errors.Is(err, os.ErrNotExist) {
 		return &Index{
@@ -167,69 +178,139 @@ func (i *IndexService) Read() (*Index, error) {
 			Version:    "2",
 			EntryCount: 0,
 			Entries:    nil,
-			Hash:       "", // This will be set once the file is writtten to disk
+			Hash:       nil, // This will be set once the file is writtten to disk
 		}, nil
 	}
 	if err != nil {
 		return nil, err
 	}
 
-	// TODO: validate index file
+	// Pre-populate header.
 	i.index.Signature = string(data[:4])
 	i.index.Version = fmt.Sprintf("%d", binary.BigEndian.Uint32(data[4:8]))
 	i.index.EntryCount = int(binary.BigEndian.Uint32(data[8:12]))
-	i.index.Hash = fmt.Sprintf("%x", data[len(data)-20:])
+	i.index.Hash = new(Hash).FromSHA1Bytes(data[len(data)-20:])
 
 	if i.index.Version != "2" {
 		return nil, fmt.Errorf("unsupported version %q", i.index.Version)
 	}
 
-	d := fmt.Sprintf("%x", sha1.Sum(data[:len(data)-20]))
-	if i.index.Hash != d {
+	payloadHash := new(Hash).From(data[:len(data)-20])
+	if i.index.Hash.String() != payloadHash.String() {
 		return nil, fmt.Errorf("digests don't match")
 	}
 
-	// Read entries
-	entries := make([]*IndexEntry, 0, 10)
-	for idx := 12; idx < len(data)-20 && len(entries) < i.index.EntryCount; {
-		entry := new(IndexEntry)
-		j := idx
-		entry.CTimeSecs = binary.BigEndian.Uint32(data[j : j+4])
-		j += 4
-		entry.CTimeNanoSecs = binary.BigEndian.Uint32(data[j : j+4])
-		j += 4
-		entry.MTimeSecs = binary.BigEndian.Uint32(data[j : j+4])
-		j += 4
-		entry.MTimeNanoSecs = binary.BigEndian.Uint32(data[j : j+4])
-		j += 4
-		entry.Dev = binary.BigEndian.Uint32(data[j : j+4])
-		j += 4
-		entry.Ino = binary.BigEndian.Uint32(data[j : j+4])
-		j += 4
-		entry.Mode = binary.BigEndian.Uint32(data[j : j+4])
-		j += 4
-		entry.Uid = binary.BigEndian.Uint32(data[j : j+4])
-		j += 4
-		entry.Gid = binary.BigEndian.Uint32(data[j : j+4])
-		j += 4
-		entry.FileSize = binary.BigEndian.Uint32(data[j : j+4])
-		j += 4
+	// Create a reader for the useful area of the buffer. The first 12 bytes are
+	// reserved for the header (signature, version, entry count) and the last 20
+	// bytes are reserved for the digest.
+	reader := bufio.NewReader(bytes.NewReader(data[12 : len(data)-20]))
 
-		copy(entry.Sha1[:], data[j:j+20])
-		j += 20
+	// Read entries stored on disk and convert them to the in-memory representation.
+	entries := make([]*IndexEntry, 0, i.index.EntryCount)
+	for idx := 0; idx < i.index.EntryCount; idx++ {
+		e := new(IndexEntry)
 
-		entry.Flags = binary.BigEndian.Uint16(data[j : j+2])
-		j += 2
+		v, err := readNBytes(reader, 4)
+		if err != nil {
+			return nil, err
+		}
+		e.CTimeSecs = binary.BigEndian.Uint32(v)
 
-		end := bytes.IndexByte(data[j:], '\x00')
-		entry.Path = string(data[j : j+end])
-		j += end
+		v, err = readNBytes(reader, 4)
+		if err != nil {
+			return nil, err
+		}
+		e.CTimeNanoSecs = binary.BigEndian.Uint32(v)
 
-		idx += ((62 + len(entry.Path) + 8) / 8) * 8
+		v, err = readNBytes(reader, 4)
+		if err != nil {
+			return nil, err
+		}
+		e.MTimeSecs = binary.BigEndian.Uint32(v)
 
-		entries = append(entries, entry)
+		v, err = readNBytes(reader, 4)
+		if err != nil {
+			return nil, err
+		}
+		e.MTimeNanoSecs = binary.BigEndian.Uint32(v)
+
+		v, err = readNBytes(reader, 4)
+		if err != nil {
+			return nil, err
+		}
+		e.Dev = binary.BigEndian.Uint32(v)
+
+		v, err = readNBytes(reader, 4)
+		if err != nil {
+			return nil, err
+		}
+		e.Ino = binary.BigEndian.Uint32(v)
+
+		v, err = readNBytes(reader, 4)
+		if err != nil {
+			return nil, err
+		}
+		e.Mode = binary.BigEndian.Uint32(v)
+
+		v, err = readNBytes(reader, 4)
+		if err != nil {
+			return nil, err
+		}
+		e.Uid = binary.BigEndian.Uint32(v)
+
+		v, err = readNBytes(reader, 4)
+		if err != nil {
+			return nil, err
+		}
+		e.Gid = binary.BigEndian.Uint32(v)
+
+		v, err = readNBytes(reader, 4)
+		if err != nil {
+			return nil, err
+		}
+		e.FileSize = binary.BigEndian.Uint32(v)
+
+		v, err = readNBytes(reader, 20)
+		if err != nil {
+			return nil, err
+		}
+		e.Hash = new(Hash).FromSHA1Bytes(v)
+
+		v, err = readNBytes(reader, 2)
+		if err != nil {
+			return nil, err
+		}
+		e.Flags = binary.BigEndian.Uint16(v)
+
+		path, err := reader.ReadBytes('\x00')
+		if err != nil {
+			return nil, err
+		}
+		// ReadBytes returns the \x00 byte as well, so we need to pop it out.
+		e.Path = string(path[:len(path)-1])
+
+		// We need to take into account the padding bytes to point the index variable to the right location.
+		totalEntryLen := ((62 + len(e.Path) + 1 /* this is the \x00 byte */ + 8) / 8) * 8
+		padding := totalEntryLen - (62 + len(e.Path) + 1 /* this is the \x00 byte */)
+		reader.Discard(padding)
+		entries = append(entries, e)
 	}
 
 	i.index.Entries = entries
 	return i.index, nil
+}
+
+func readNBytes(r *bufio.Reader, n int) ([]byte, error) {
+	if n == 0 || r == nil {
+		return nil, nil
+	}
+	peeked, err := r.Peek(n)
+	if err != nil {
+		return nil, err
+	}
+	_, err = r.Discard(n)
+	if err != nil {
+		return nil, err
+	}
+	return peeked, nil
 }

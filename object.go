@@ -17,15 +17,21 @@ type Hash struct {
 	sha1 [20]byte
 }
 
+// From returns a new *Hash from a given file.
+func (h *Hash) From(data []byte) *Hash {
+	h.sha1 = sha1.Sum(data)
+	return h
+}
+
 // From returns a new *Hash from an existing SHA-1.
 func (h *Hash) FromSHA1(sha1 [20]byte) *Hash {
 	h.sha1 = sha1
 	return h
 }
 
-// From returns a new *Hash from a given file.
-func (h *Hash) From(data []byte) *Hash {
-	h.sha1 = sha1.Sum(data)
+// From returns a new *Hash from an existing SHA-1.
+func (h *Hash) FromSHA1Bytes(sha1 []byte) *Hash {
+	copy(h.sha1[:], sha1)
 	return h
 }
 
@@ -64,7 +70,7 @@ func (b *Blob) Marshal() ([]byte, error) {
 type TreeEntry struct {
 	mode uint32
 	path string
-	sha1 [20]byte
+	hash *Hash
 }
 
 // Tree represents a directory with potentially other directories or files.
@@ -75,7 +81,7 @@ type Tree struct {
 func (t *Tree) Marshal() ([]byte, error) {
 	b := new(bytes.Buffer)
 	for _, e := range t.Entries {
-		b.WriteString(fmt.Sprintf("%o %s\x00%s", e.mode, e.path, e.sha1))
+		b.WriteString(fmt.Sprintf("%o %s\x00%s", e.mode, e.path, e.hash))
 	}
 	data := b.Bytes()
 	header := []byte(fmt.Sprintf("tree %d\x00", len(data)))
@@ -185,8 +191,9 @@ func (o *ObjectService) StoreObject(m Marshaller) (*Hash, error) {
 }
 
 // ReadObject reads the object from disk, uncompress and returns its contents.
-func (o *ObjectService) ReadObject(hash string) ([]byte, error) {
-	path := filepath.Join(o.path, hash[:2], hash[2:])
+func (o *ObjectService) ReadObject(hash *Hash) ([]byte, error) {
+	hashStr := hash.String()
+	path := filepath.Join(o.path, hashStr[:2], hashStr[2:])
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
