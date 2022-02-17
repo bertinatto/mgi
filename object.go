@@ -81,7 +81,7 @@ type Tree struct {
 func (t *Tree) Marshal() ([]byte, error) {
 	b := new(bytes.Buffer)
 	for _, e := range t.Entries {
-		b.WriteString(fmt.Sprintf("%o %s\x00%s", e.mode, e.path, e.hash))
+		b.WriteString(fmt.Sprintf("%o %s\x00%s", e.mode, e.path, e.hash.Sha1()))
 	}
 	data := b.Bytes()
 	header := []byte(fmt.Sprintf("tree %d\x00", len(data)))
